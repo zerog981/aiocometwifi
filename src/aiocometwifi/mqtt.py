@@ -21,7 +21,7 @@ sub_state is None on the first subscription to a given topic.
 """
 
 UnsubscribeFn = Callable[[SubState], Coroutine[Any, Any, None]]
-"""(sub_state) for a state previously returned by :data:`SubscribeFn."""
+"""(sub_state) for a state previously returned by :data:`SubscribeFn`."""
 
 
 class MqttClient:
@@ -75,8 +75,8 @@ class MqttClient:
     async def unsubscribe(self, unique_id: str, topic: str) -> None:
         """Unsubscribe from a topic.
 
-        :param unique_id: The value passed to meth:`subscribe.
-        :param topic: The topic passed to meth:`subscribe.
+        :param unique_id: The value passed to meth:`subscribe`.
+        :param topic: The topic passed to meth:`subscribe`.
         """
         substate = self._substates.pop((unique_id, topic), None)
         if substate is None:
