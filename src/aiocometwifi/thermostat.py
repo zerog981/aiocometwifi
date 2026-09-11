@@ -32,7 +32,7 @@ from aiocometwifi.const import (
     TEMPERATURE_SETPOINT_MIN,
 )
 from aiocometwifi.enums import WindowOpenSensitivity
-from aiocometwifi.exceptions import CometWifiConnectionError
+from aiocometwifi.exceptions import CometWifiConnectionError, CometWifiValueError
 from aiocometwifi.helper import (
     decode_temperature,
     encode_temperature,
@@ -89,11 +89,16 @@ class ThermostatConfig:
         return self._dst
 
     def write_config(self, config_byte: int) -> None:
-        """Update configuration based on configuration byte received from thermostat.
-        :param config_byte: Configuration byte as received from thermostat. Bit 0 is DST, Bit 1 is Mirrored Display, Bit 2 is Key Lock, and Bit 3 is Key Lock Plus.
+        """Update configuration from the byte received from thermostat.
+
+        :param config_byte: Configuration byte as received from thermostat.
+            Bit 0 is DST, Bit 1 is Mirrored Display, Bit 2 is Key Lock,
+            and Bit 3 is Key Lock Plus.
+        :raises CometWifiValueError: If the byte is negative.
         """
         if config_byte < 0:
-            raise ValueError("Invalid configuration byte.")
+            msg = f"Invalid configuration byte: {config_byte}"
+            raise CometWifiValueError(msg)
         self._key_lock_plus = bool(config_byte & CFG_KEY_LOCK_PLUS)
         self._key_lock = bool(config_byte & CFG_KEY_LOCK)
         self._display_mirrored = bool(config_byte & CFG_MIRRORED_DISPLAY)
@@ -111,8 +116,7 @@ class ThermostatWindowOpenConfig:
 class Thermostat:
     """Thermostat communication class.
 
-    Attributes:
-        config: Thermostat configuration.
+    :ivar config: Thermostat configuration.
 
     """
 
@@ -311,7 +315,7 @@ class Thermostat:
         Fetches setpoint temperature, ambient temperature, battery level,
         configuration parameters, open window settings etc.
 
-        :param: request_value: Supply requested values as
+        :param request_value: Supply requested values as
         REQUEST_TEMPERATURE_SETPOINT | REQUEST_TEMPERATURE_AMBIENT |
         REQUEST_WIFI_SIGNAL_STRENGTH.
 
@@ -324,8 +328,9 @@ class Thermostat:
     async def update_standard_values(self) -> None:
         """Query thermostat for standard parameters.
 
-        Fetches setpoint temperature, ambient temperature, temperature offset, configuration, datetime, window open
-        configuration, battery level, base software version, wifi software version, and wifi signal strength.
+        Fetches setpoint temperature, ambient temperature, temperature offset,
+        configuration, datetime, window open configuration, battery level, base
+        software version, wifi software version, and wifi signal strength.
 
         """
         await self.update_values(
@@ -351,7 +356,8 @@ class Thermostat:
             REQUEST_TEMPERATURE_SETPOINT
             | REQUEST_TEMPERATURE_AMBIENT
             | REQUEST_TEMPERATURE_OFFSET
-        )  # TODO: Add window open
+        )
+        # Window open detection is not implemented yet, but should be requested later.
 
     async def update_config(self) -> None:
         """Query thermostat for configuration.
@@ -364,7 +370,7 @@ class Thermostat:
     async def _config_enable(self, values: int = 0x0000) -> None:
         """Enable a config setting.
 
-        :param: values: Flags of config parameters to enable.
+        :param values: Flags of config parameters to enable.
         """
         self._require_connected()
         # Payload has five bytes with first byte containing enable flags
@@ -379,7 +385,7 @@ class Thermostat:
     async def _config_disable(self, values: int = 0x0000) -> None:
         """Disable a config setting.
 
-        :param: values: Flags of config parameters to disable.
+        :param values: Flags of config parameters to disable.
         """
         self._require_connected()
         # Payload has five bytes with second byte containing disable flags
@@ -460,7 +466,7 @@ class Thermostat:
     async def set_setpoint_temperature(self, temperature: float) -> None:
         """Set thermostat setpoint temperature.
 
-        :param: temperature: Setpoint temperature.
+        :param temperature: Setpoint temperature.
 
         """
         self._require_connected()

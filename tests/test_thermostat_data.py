@@ -1,12 +1,12 @@
 """Test ThermostatData dataclass."""
 
-from comet_wifi_communicator.thermostat import ThermostatData
+from aiocometwifi.thermostat import ThermostatData
 
 
 class TestThermostatData:
     """Test ThermostatData dataclass."""
 
-    def test_default_values(self):
+    def test_default_values(self) -> None:
         """Initialization with all standard values."""
         data = ThermostatData()
 

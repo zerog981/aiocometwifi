@@ -3,7 +3,7 @@
 import pytest
 
 from aiocometwifi.mqtt import MqttClient, SubscribeCallback, SubState
-from aiocometwifi.thermostat import Thermostat
+from aiocometwifi.thermostat import Thermostat, ThermostatConfig
 
 
 class FakeTransport:
@@ -70,6 +70,12 @@ def transport() -> FakeTransport:
 def mqtt_client(transport: FakeTransport) -> MqttClient:
     """Return an MqttClient wired to the fake transport."""
     return MqttClient(transport.publish, transport.subscribe, transport.unsubscribe)
+
+
+@pytest.fixture
+def config() -> ThermostatConfig:
+    """Return a thermostat configuration with every flag cleared."""
+    return ThermostatConfig()
 
 
 @pytest.fixture
