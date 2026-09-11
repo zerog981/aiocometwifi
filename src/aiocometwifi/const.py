@@ -1,6 +1,7 @@
 """Constants for communicator."""
 
-CONNECTION_TEST_TIMEOUT = 30  # seconds
+CONNECTION_TEST_ECHO_GRACE = 5.0  # Seconds to wait for the broker's echo
+CONNECTION_TEST_MIN_INTERVAL = 30.0  # Seconds between pongs
 CONNECTION_TEST_COMMAND = "#COMM-TEST"
 
 TEMPERATURE_HEX_OFF = 0x0F

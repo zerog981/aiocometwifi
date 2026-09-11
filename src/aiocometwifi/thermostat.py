@@ -1,8 +1,9 @@
 """Thermostat communication class."""
 
+import asyncio
 import logging
-import time
 from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from aiocometwifi.const import (
@@ -12,7 +13,8 @@ from aiocometwifi.const import (
     CFG_MIRRORED_DISPLAY,
     CFG_PAYLOAD_LENGTH,
     CONNECTION_TEST_COMMAND,
-    CONNECTION_TEST_TIMEOUT,
+    CONNECTION_TEST_ECHO_GRACE,
+    CONNECTION_TEST_MIN_INTERVAL,
     HEX_PREFIX,
     REQUEST_BASE_SOFTWARE_VERSION,
     REQUEST_BATTERY,
@@ -30,6 +32,7 @@ from aiocometwifi.const import (
     TEMPERATURE_SETPOINT_MIN,
 )
 from aiocometwifi.enums import WindowOpenSensitivity
+from aiocometwifi.exceptions import CometWifiConnectionError
 from aiocometwifi.helper import (
     decode_temperature,
     encode_temperature,
@@ -131,9 +134,10 @@ class Thermostat:
         self._data = ThermostatData()
         self.config = ThermostatConfig()
 
-        self._last_connection_test_published = (
-            0  # UNIX time of last published connection test.
-        )
+        # Ping handling
+        self._expected_echoes: list[float] = []
+        self._last_pong = float("-inf")
+        self._pending: set[asyncio.Task[None]] = set()
 
     @property
     def connected(self) -> bool:
@@ -185,15 +189,11 @@ class Thermostat:
         if topic == self._topics.reply_topics["WILL"]:
             self._connected = False
             return
-        self._connected = True
 
         if topic == self._topics.command_topics["CONNECTION_TEST"]:
-            if (
-                time.time() - self._last_connection_test_published
-                > CONNECTION_TEST_TIMEOUT
-            ):
-                self._publish_connection_test()
+            self._on_ping()
             return
+        self._connected = True
 
         try:
             self._store_reply(topic, payload.lstrip(HEX_PREFIX))
@@ -236,12 +236,59 @@ class Thermostat:
         else:
             self._data.temperature_setpoint = decode_temperature(value)
 
-    def _publish_connection_test(self) -> None:
-        self._mqtt_client.publish(
-            self._topics.command_topics["CONNECTION_TEST"],
-            CONNECTION_TEST_COMMAND,
-        )
-        self._last_connection_test_published = time.time()
+    def _require_connected(self) -> None:
+        """Refuse a command if the thermostat is not connected.
+
+        :raises CometWifiConnectionError: If no message has arrived from the
+        thermostat since the last :meth:`connect` or thermostat has disconnected.
+        """
+        if not self.connected:
+            msg = "Thermostat has not answered."
+            raise CometWifiConnectionError(msg)
+
+    def _on_ping(self) -> None:
+        """Answer a ping from the thermostat, but ignore echo of broker pong.
+
+        The pong goes out on the same topic the thermostat publishes its ping to
+        and the broker replies with the exact same message. Thus, every pong
+        sent out is received back as ping. Therefore, an expectation is stored
+        when a pong is sent out. The expectation expires after
+        CONNECTION_TEST_ECHO_GRACE (a lost echo does not mask a real ping). Further,
+        there is a minimum time between sent out pongs to prevent a runaway loop.
+        """
+        now = monotonic()
+        self._expected_echoes = [
+            sent
+            for sent in self._expected_echoes
+            if now - sent < CONNECTION_TEST_ECHO_GRACE
+        ]
+        if self._expected_echoes:
+            self._expected_echoes.pop(0)  # Sent out pong from the broker, the echo
+            return
+
+        self._connected = True
+        if now - self._last_pong < CONNECTION_TEST_MIN_INTERVAL:
+            _LOGGER.warning(
+                "Not answering ping from %s: Last pong was %.1f s ago.",
+                self._mac,
+                now - self._last_pong,
+            )
+            return
+
+        self._last_pong = now
+        self._expected_echoes.append(now)
+        task = asyncio.get_running_loop().create_task(self._publish_connection_test())
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def _publish_connection_test(self) -> None:
+        """Publish a pong."""
+        try:
+            await self._mqtt.publish(
+                self._topics.command_topics["CONNECTION_TEST"], CONNECTION_TEST_COMMAND
+            )
+        except Exception:
+            _LOGGER.exception("Could not answer ping from %s.", self._mac)
 
     async def connect(self) -> None:
         """Subscribe to thermostat topics and request standard values."""
@@ -251,20 +298,26 @@ class Thermostat:
 
     async def disconnect(self) -> None:
         """Release the subscriptions done by :meth:`connect`."""
+        for task in self._pending:
+            task.cancel()
         for topic in self._subscriptions:
             await self._mqtt.unsubscribe(self._mac, topic)
+        self._expected_echoes.clear()
         self._connected = False
 
     async def update_values(self, request_value: int = 0xFFFFFFFF) -> None:
-        """Update all parameters.
+        """Request parameters.
 
-        Fetches setpoint temperature, ambient temperature, battery level, configuration parameters,
-        open window settings etc. Supply the constants in the form
-        REQUEST_TEMPERATURE_SETPOINT | REQUEST_TEMPERATURE_AMBIENT | REQUEST_WIFI_SIGNAL_STRENGTH.
+        Fetches setpoint temperature, ambient temperature, battery level,
+        configuration parameters, open window settings etc.
+
+        :param: request_value: Supply requested values as
+        REQUEST_TEMPERATURE_SETPOINT | REQUEST_TEMPERATURE_AMBIENT |
+        REQUEST_WIFI_SIGNAL_STRENGTH.
 
         """
         request_str = f"{HEX_PREFIX}{request_value:08X}"
-        self._mqtt_client.publish(
+        await self._mqtt.publish(
             self._topics.command_topics["GENERAL_VALUE_REQUEST"], request_str
         )
 
@@ -309,25 +362,31 @@ class Thermostat:
         await self.update_values(REQUEST_CONFIG)
 
     async def _config_enable(self, values: int = 0x0000) -> None:
-        if not self._connected:
-            raise ConnectionError
+        """Enable a config setting.
+
+        :param: values: Flags of config parameters to enable.
+        """
+        self._require_connected()
         # Payload has five bytes with first byte containing enable flags
         config_payload = (
             f"{HEX_PREFIX}{values:02X}{'0' * ((CFG_PAYLOAD_LENGTH - 1) * 2)}"
         )
-        self._mqtt_client.publish(
+        await self._mqtt.publish(
             self._topics.command_topics["WRITE_CONFIGURATION"], config_payload
         )
         await self.update_config()
 
     async def _config_disable(self, values: int = 0x0000) -> None:
-        if not self._connected:
-            raise ConnectionError
+        """Disable a config setting.
+
+        :param: values: Flags of config parameters to disable.
+        """
+        self._require_connected()
         # Payload has five bytes with second byte containing disable flags
         config_payload = (
             f"{HEX_PREFIX}{'0' * 2}{values:02X}{'0' * ((CFG_PAYLOAD_LENGTH - 2) * 2)}"
         )
-        self._mqtt_client.publish(
+        await self._mqtt.publish(
             self._topics.command_topics["WRITE_CONFIGURATION"], config_payload
         )
         await self.update_config()
@@ -398,18 +457,17 @@ class Thermostat:
         """
         await self._config_disable(CFG_DST)
 
-    async def set_temperature(self, temperature: float) -> None:
-        """Set thermostat temperature.
+    async def set_setpoint_temperature(self, temperature: float) -> None:
+        """Set thermostat setpoint temperature.
 
-        Send setpoint temperature to device.
+        :param: temperature: Setpoint temperature.
 
         """
-        if not self._connected:
-            raise ConnectionError
+        self._require_connected()
         temperature = min(temperature, TEMPERATURE_SETPOINT_MAX)
         temperature = max(temperature, TEMPERATURE_SETPOINT_MIN)
         temperature_encoded = f"{HEX_PREFIX}{encode_temperature(temperature):02X}"
-        self._mqtt_client.publish(
+        await self._mqtt.publish(
             self._topics.command_topics["WRITE_TEMPERATURE_SETPOINT"],
             temperature_encoded,
         )
@@ -419,11 +477,9 @@ class Thermostat:
         """Turn thermostat off.
 
         Disable thermostat heating. Frost protection may stay enabled.
-
         """
-        if not self._connected:
-            raise ConnectionError
-        self._mqtt_client.publish(
+        self._require_connected()
+        await self._mqtt.publish(
             self._topics.command_topics["WRITE_TEMPERATURE_SETPOINT"],
             f"{HEX_PREFIX}{TEMPERATURE_HEX_OFF:02X}",
         )
@@ -433,11 +489,9 @@ class Thermostat:
         """Turn thermostat fully on.
 
         Set thermostat to be fully open (unregulated heating).
-
         """
-        if not self._connected:
-            raise ConnectionError
-        self._mqtt_client.publish(
+        self._require_connected()
+        await self._mqtt.publish(
             self._topics.command_topics["WRITE_TEMPERATURE_SETPOINT"],
             f"{HEX_PREFIX}{TEMPERATURE_HEX_ON:02X}",
         )

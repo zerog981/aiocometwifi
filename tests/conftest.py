@@ -23,6 +23,7 @@ class FakeTransport:
         self._issued = 0
         self._callbacks: dict[str, SubscribeCallback] = {}
         self._topic_of_ticket: dict[int, str] = {}
+        self.publish_error: Exception | None = None
 
     async def publish(
         self,
@@ -31,7 +32,9 @@ class FakeTransport:
         qos: int,
         retain: bool,  # noqa: FBT001
     ) -> None:
-        """Record a published message."""
+        """Record a published message, or fail if instructed."""
+        if self.publish_error is not None:
+            raise self.publish_error
         self.published.append((topic, payload, qos, retain))
 
     async def subscribe(
@@ -80,3 +83,13 @@ async def connected_thermostat(thermostat: Thermostat) -> Thermostat:
     """Return a thermostat with subscriptions in place."""
     await thermostat.connect()
     return thermostat
+
+
+@pytest.fixture
+def online_thermostat(
+    connected_thermostat: Thermostat, transport: FakeTransport
+) -> Thermostat:
+    """Return a thermostat that has answered."""
+    transport.deliver("01/AABBCCDDEEFF/V/A1", "#23")  # Temperature ambient
+    transport.published.clear()
+    return connected_thermostat

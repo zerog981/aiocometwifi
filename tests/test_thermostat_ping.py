@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from aiocometwifi.const import CONNECTION_TEST_MIN_INTERVAL, ECHO_GRACE
+from aiocometwifi.const import CONNECTION_TEST_ECHO_GRACE, CONNECTION_TEST_MIN_INTERVAL
 
 if TYPE_CHECKING:
     from aiocometwifi.thermostat import Thermostat
@@ -67,7 +67,7 @@ class TestPong:
     async def test_ping_marks_the_thermostat_connected(
         self, connected_thermostat: Thermostat, transport: FakeTransport
     ) -> None:
-        """A ping is the thermostat talking to us."""
+        """A ping means the thermostat is connected."""
         await receive(transport, PING_TOPIC, COMM_TEST)
 
         assert connected_thermostat.connected is True
@@ -128,9 +128,9 @@ class TestEcho:
     async def test_echo_within_grace_is_still_recognised(
         self, transport: FakeTransport, clock: FakeClock
     ) -> None:
-        """A slow echo just inside the grace period is still ours."""
+        """A slow echo just inside the grace period is the one send by the broker."""
         await receive(transport, PING_TOPIC, COMM_TEST)
-        clock.advance(ECHO_GRACE / 2)
+        clock.advance(CONNECTION_TEST_ECHO_GRACE / 2)
 
         await receive(transport, PING_TOPIC, COMM_TEST)  # slow echo
 
@@ -151,7 +151,9 @@ class TestRunawayGuard:
         """Pings arriving faster than the floor are answered once, and logged."""
         with caplog.at_level(logging.WARNING, logger="aiocometwifi.thermostat"):
             for _ in range(5):
-                clock.advance(ECHO_GRACE + 1)  # past the echo window each time
+                clock.advance(
+                    CONNECTION_TEST_ECHO_GRACE + 1
+                )  # past the echo window each time
                 await receive(transport, PING_TOPIC, COMM_TEST)
 
         assert transport.published == [PONG]
