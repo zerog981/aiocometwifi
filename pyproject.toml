@@ -5,7 +5,7 @@ requires = [
 build-backend = "hatchling.build"
 [project]
 name = "aiocometwifi"
-version = "0.0.0"
+version = "0.1.0"
 authors = [
   { name="zerog981", email="zerog981@example.com" },
 ]
