@@ -142,14 +142,14 @@ Topics are `01/<MAC>/<group>/<code>` with the MAC as twelve uppercase hex digits
 
 | Topic | Direction | Content |
 |---|---|---|
-| `S/AF` | → | Value request, 32-bit mask of what to report |
-| `S/A0` | → | Write setpoint (`#0F` = off, `#39` = fully on) |
-| `S/A3` | → | Write configuration flags |
-| `S/XX` | ↔ | Connection test: the device publishes a ping, the host must answer `#COMM-TEST` on the same topic |
-| `V/A0`, `V/A1`, `V/A2` | ← | Setpoint, ambient temperature, offset |
-| `V/A3` | ← | Configuration (key lock, key lock plus, mirrored display, DST) |
-| `V/A6` | ← | Battery level |
-| `V/XX` | ← | Last will, the device disconnected |
+| `S/AF` | Host → Device | Value request, 32-bit mask of what to report |
+| `S/A0` | Host → Device | Write setpoint (`#0F` = off, `#39` = fully on) |
+| `S/A3` | Host → Device | Write configuration flags |
+| `S/XX` | Host ↔ Device | Connection test: the device publishes a ping, the host must answer `#COMM-TEST` on the same topic |
+| `V/A0`, `V/A1`, `V/A2` | Host ← Device | Setpoint, ambient temperature, offset |
+| `V/A3` | Host ← Device | Configuration (key lock, key lock plus, mirrored display, DST) |
+| `V/A6` | Host ← Device | Battery level |
+| `V/XX` | Host ← Device | Last will, the device disconnected |
 
 Because the pong goes out on the very topic the library is subscribed to, the broker echoes it
 back. The library recognizes its own echoes and rate-limits pongs, so it never loops.
