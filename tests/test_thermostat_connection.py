@@ -1,48 +1,65 @@
-"""Test MQTT connection handling."""
+"""Test connecting/disconnecting from the thermostat."""
 
-from unittest.mock import Mock
+from typing import TYPE_CHECKING
 
-import pytest
-from comet_wifi_communicator.thermostat import MQTTConnectError
-from paho.mqtt.packettypes import PacketTypes
-from paho.mqtt.reasoncodes import ReasonCode
+if TYPE_CHECKING:
+    from aiocometwifi.thermostat import Thermostat
+
+    from .conftest import FakeTransport
+
+MAC = "AABBCCDDEEFF"
+PING_TOPIC = f"01/{MAC}/S/XX"
+REQUEST_TOPIC = f"01/{MAC}/S/AF"
+REPLY_TOPICS = [
+    f"01/{MAC}/V/{code}" for code in ("A0", "A1", "A2", "A3", "BD", "A6", "XX")
+]
 
 
-class TestMqttConnection:
-    """Test MQTT connection handling."""
+class TestConnect:
+    """Test connect()."""
 
-    def test_on_mqtt_connect_success(self, thermostat):
-        """Successful connection subscribes to all reply topics."""
-        mock_client = Mock()
-        reason_code = ReasonCode(PacketTypes.CONNACK, aName="Success")
-
-        thermostat._on_mqtt_connect(mock_client, None, None, reason_code)
-
-        assert (
-            mock_client.subscribe.call_count == len(thermostat._topics.reply_topics) + 1
-        )
-
-    def test_on_mqtt_connect_failure_raises_error(self, thermostat):
-        """Connection failure (reason_code != 0) raises MQTTConnectError."""
-        mock_client = Mock()
-        with pytest.raises(MQTTConnectError):
-            rc = ReasonCode(
-                PacketTypes.CONNACK, aName="Server unavailable"
-            )  # Server unavailable
-            thermostat._on_mqtt_connect(mock_client, None, None, reason_code=rc)
-
-    @pytest.mark.asyncio
-    async def test_connect_starts_loop(self, thermostat, mock_mqtt_client):
-        """Make sure thermostat.connect() calls connect() and loop_start()."""
+    async def test_connect_subscribes_to_replies_and_ping(
+        self, thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """Reply topics and ping topics are subscribed to."""
         await thermostat.connect()
-        mock_mqtt_client.connect.assert_called_once_with("192.168.1.100", 1883)
-        mock_mqtt_client.loop_start.assert_called_once()
+        subscribed = [topic for _, topic, _ in transport.subscribed]
+        assert subscribed == [*REPLY_TOPICS, PING_TOPIC]
 
-    @pytest.mark.asyncio
-    async def test_disconnect_stops_loop(self, thermostat, mock_mqtt_client):
-        """Make sure thermostat.disconnect() calls disconnect() and loop_stop()."""
+    async def test_connect_never_subscribes_with_a_wildcard(
+        self, thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """Wildcards mix up other thermostat's traffic with this thermostat."""
+        await thermostat.connect()
+        for _, topic, _ in transport.subscribed:
+            assert "+" not in topic
+            assert "#" not in topic
+
+    async def test_connect_requests_the_standard_values(
+        self, thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """If subscribed the standard values are requested from the thermostat."""
+        await thermostat.connect()
+        assert transport.published == [(REQUEST_TOPIC, "#7F000E00", 0, False)]
+
+
+class TestDisconnect:
+    """Test disconnect()."""
+
+    async def test_disconnect_releases_every_subscription(
+        self, thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """Each subscription made by connect() is released."""
+        await thermostat.connect()
         await thermostat.disconnect()
+        expected = [{"ticket": n} for n in range(1, len(REPLY_TOPICS) + 2)]
+        assert transport.unsubscribed == expected
+        assert thermostat.connected is False
 
-        mock_mqtt_client.disconnect.assert_called_once()
-        mock_mqtt_client.loop_stop.assert_called_once()
+    async def test_disconnect_without_connect(
+        self, thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """Releasing subscriptions that were never made is not an error."""
+        await thermostat.disconnect()
+        assert transport.unsubscribed == []
         assert thermostat.connected is False

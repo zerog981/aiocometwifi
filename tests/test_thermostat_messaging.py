@@ -1,144 +1,171 @@
-"""Test MQTT message reception and parsing."""
+"""Test handling of messages from the thermostat."""
 
-import time
-from unittest.mock import Mock, patch
+import logging
+from typing import TYPE_CHECKING
 
-import pytest
-from comet_wifi_communicator.const import (
-    CONNECTION_TEST_TIMEOUT,
-    HEX_PREFIX,
-    TEMPERATURE_HEX_OFF,
-    TEMPERATURE_HEX_ON,
-    TEMPERATURE_SETPOINT_MAX,
-    TEMPERATURE_SETPOINT_MIN,
-)
+from aiocometwifi.const import TEMPERATURE_SETPOINT_MAX, TEMPERATURE_SETPOINT_MIN
 
+if TYPE_CHECKING:
+    import pytest
 
-class TestMqttMessageHandling:
-    """Test MQTT message reception and parsing."""
+    from aiocometwifi.thermostat import Thermostat
 
-    def test_on_message_will_sets_disconnected(self, thermostat):
-        """Receipt of WILL message sets connected=False."""
-        thermostat._connected = True
-        mock_message = Mock()
-        mock_message.topic = thermostat._topics.reply_topics["WILL"]
+    from .conftest import FakeTransport
 
-        thermostat._on_mqtt_message(None, None, mock_message)
-
-        assert thermostat.connected is False
-
-    def test_on_message_ambient_temperature(self, thermostat):
-        """Ambient temperature message updates internal value."""
-        mock_message = Mock()
-        mock_message.topic = thermostat._topics.reply_topics["TEMPERATURE_AMBIENT"]
-        mock_message.payload.decode.return_value = "#23"
-
-        thermostat._on_mqtt_message(None, None, mock_message)
-
-        assert thermostat.temperature_ambient == 17.5
-
-    def test_on_message_configuration(self, thermostat):
-        """Configuration message updates internal value."""
-        mock_message = Mock()
-        mock_message.topic = thermostat._topics.reply_topics["CONFIGURATION"]
-        mock_message.payload.decode.return_value = "#0502"
-
-        thermostat._on_mqtt_message(None, None, mock_message)
-
-        assert thermostat.config.dst is True
-        assert thermostat.config.display_mirrored is False
-        assert thermostat.config.key_lock is True
-        assert thermostat.config.key_lock_plus is False
-
-    def test_on_message_setpoint_heating(self, thermostat):
-        """Heating setpoint temperature updates value and heating status."""
-        mock_message = Mock()
-        mock_message.topic = thermostat._topics.reply_topics["TEMPERATURE_SETPOINT"]
-        mock_message.payload.decode.return_value = "#28"
-
-        thermostat._on_mqtt_message(None, None, mock_message)
-
-        assert thermostat.setpoint == 20.0
-        assert thermostat.is_heating is True
-
-    def test_on_message_setpoint_off(self, thermostat):
-        """OFF setpoint sets is_heating=False and setpoint to MIN."""
-        mock_message = Mock()
-        mock_message.topic = thermostat._topics.reply_topics["TEMPERATURE_SETPOINT"]
-        mock_message.payload.decode.return_value = (
-            f"{HEX_PREFIX}{TEMPERATURE_HEX_OFF:02X}"
-        )
-
-        thermostat._on_mqtt_message(None, None, mock_message)
-
-        assert thermostat.is_heating is False
-        assert thermostat.setpoint == TEMPERATURE_SETPOINT_MIN
-
-    def test_on_message_setpoint_fully_on(self, thermostat):
-        """Setpoint for fully open thermostat sets setpoint to MAX and is_heating=True."""
-        mock_message = Mock()
-        mock_message.topic = thermostat._topics.reply_topics["TEMPERATURE_SETPOINT"]
-        mock_message.payload.decode.return_value = (
-            f"{HEX_PREFIX}{TEMPERATURE_HEX_ON:02X}"
-        )
-
-        thermostat._on_mqtt_message(None, None, mock_message)
-
-        assert thermostat.setpoint == TEMPERATURE_SETPOINT_MAX
-        assert thermostat.is_heating is True
-
-    # def test_on_message_battery_level(self, thermostat):
-    #     """Battery message updates battery_level."""
-    #     mock_message = Mock()
-    #     mock_message.topic = thermostat._topics.reply_topics["BATTERY"]
-    #     mock_message.payload.decode.return_value = "#64"
-    #
-    #     thermostat._on_mqtt_message(None, None, mock_message)
-    #
-    #     assert thermostat.battery_level == 100
-
-    def test_on_message_connection_test_timeout_not_exceeded(self, thermostat):
-        """Test if connection test when timeout is not exceeded is ignored."""
-        thermostat._last_connection_test_published = time.time()
-        mock_message = Mock()
-        mock_message.topic = thermostat._topics.command_topics["CONNECTION_TEST"]
-
-        with patch.object(thermostat, "_publish_connection_test") as mock_publish:
-            thermostat._on_mqtt_message(None, None, mock_message)
-            mock_publish.assert_not_called()
-
-    def test_on_message_connection_test_timeout_exceeded(self, thermostat):
-        """Connection test when timeout exceeded publishes response."""
-        thermostat._last_connection_test_published = time.time() - (
-            CONNECTION_TEST_TIMEOUT + 1
-        )
-        thermostat._connected = False
-        mock_message = Mock()
-        mock_message.topic = thermostat._topics.command_topics["CONNECTION_TEST"]
-
-        with patch.object(thermostat, "_publish_connection_test") as mock_publish:
-            thermostat._on_mqtt_message(None, None, mock_message)
-            mock_publish.assert_called_once()
-            assert thermostat.connected is True
+MAC = "AABBCCDDEEFF"
+SETPOINT_TOPIC = f"01/{MAC}/V/A0"
+AMBIENT_TOPIC = f"01/{MAC}/V/A1"
+OFFSET_TOPIC = f"01/{MAC}/V/A2"
+CONFIG_TOPIC = f"01/{MAC}/V/A3"
+BATTERY_TOPIC = f"01/{MAC}/V/A6"
+KEY_LOCK_PLUS_TOPIC = f"01/{MAC}/V/BD"
+WILL_TOPIC = f"01/{MAC}/V/XX"
 
 
-class TestPublishing:
-    """Test outgoing MQTT messages."""
+class TestReplies:
+    """Test that replies update the thermostat's values."""
 
-    def test_publish_connection_test(self, thermostat, mock_mqtt_client):
-        """Connection test publishes and updates time of last connection test."""
-        with patch("time.time", return_value=1000.0):
-            thermostat._publish_connection_test()
+    def test_ambient_temperature(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """An ambient temperature reply is decoded from hex half-degrees."""
+        transport.deliver(AMBIENT_TOPIC, "#23")
 
-        mock_mqtt_client.publish.assert_called_once()
-        assert thermostat._last_connection_test_published == 1000.0
+        assert connected_thermostat.temperature_ambient == 17.5
 
-    @pytest.mark.asyncio
-    async def test_update_values_publishes_request(self, thermostat, mock_mqtt_client):
-        """update_values publishes formatted hex request."""
-        request_value = 0x03000000
-        await thermostat.update_values(request_value)
+    def test_setpoint_heating(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """A plain setpoint reply sets the setpoint and marks heating on."""
+        transport.deliver(SETPOINT_TOPIC, "#28")
 
-        mock_mqtt_client.publish.assert_called()
-        call_args = mock_mqtt_client.publish.call_args
-        assert "#03000000" in call_args[0][1]
+        assert connected_thermostat.setpoint == 20.0
+        assert connected_thermostat.is_heating is True
+
+    def test_setpoint_off(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """The off code marks heating off and pins the setpoint to the minimum."""
+        transport.deliver(SETPOINT_TOPIC, "#28")
+        transport.deliver(SETPOINT_TOPIC, "#0F")
+
+        assert connected_thermostat.is_heating is False
+        assert connected_thermostat.setpoint == TEMPERATURE_SETPOINT_MIN
+
+    def test_setpoint_fully_on(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """The fully-on code pins the setpoint to the maximum with heating on."""
+        transport.deliver(SETPOINT_TOPIC, "#39")
+
+        assert connected_thermostat.setpoint == TEMPERATURE_SETPOINT_MAX
+        assert connected_thermostat.is_heating is True
+
+    def test_setpoint_codes_are_case_insensitive(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """A lowercase off code is still the off code."""
+        transport.deliver(SETPOINT_TOPIC, "#0f")
+
+        assert connected_thermostat.is_heating is False
+
+    def test_temperature_offset(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """An offset reply is decoded like a temperature."""
+        transport.deliver(OFFSET_TOPIC, "#04")
+
+        assert connected_thermostat.temperature_offset == 2.0
+
+    def test_battery_level(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """A battery reply is a plain hex integer."""
+        transport.deliver(BATTERY_TOPIC, "#64")
+
+        assert connected_thermostat.battery_level == 100
+
+    def test_configuration(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """The config flags live in the second byte of the reply."""
+        transport.deliver(CONFIG_TOPIC, "#0502")
+
+        config = connected_thermostat.config
+        assert config.dst is True
+        assert config.display_mirrored is False
+        assert config.key_lock is True
+        assert config.key_lock_plus is False
+
+    def test_untracked_reply_is_ignored(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """A reply we subscribe to but do not track does not do anything."""
+        transport.deliver(KEY_LOCK_PLUS_TOPIC, "#01")
+
+        assert connected_thermostat.connected is True
+
+
+class TestConnected:
+    """Test how messages influence the connected flag."""
+
+    def test_any_reply_marks_the_thermostat_connected(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """Hearing from the device means connected."""
+        assert connected_thermostat.connected is False
+
+        transport.deliver(AMBIENT_TOPIC, "#23")
+
+        assert connected_thermostat.connected is True
+
+    def test_will_marks_the_thermostat_disconnected(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """The last will means the device disconnected from the broker."""
+        transport.deliver(AMBIENT_TOPIC, "#23")
+
+        transport.deliver(WILL_TOPIC, "")
+
+        assert connected_thermostat.connected is False
+
+    async def test_nothing_is_delivered_after_disconnect(
+        self, connected_thermostat: Thermostat, transport: FakeTransport
+    ) -> None:
+        """Once unsubscribed, the transport no longer reaches the thermostat."""
+        await connected_thermostat.disconnect()
+
+        transport.deliver(AMBIENT_TOPIC, "#23")
+
+        assert connected_thermostat.temperature_ambient == 0.0
+
+
+class TestMalformedPayload:
+    """Test that a bad payload is dropped, never raised."""
+
+    def test_malformed_payload_is_logged_and_dropped(
+        self,
+        connected_thermostat: Thermostat,
+        transport: FakeTransport,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Garbage on a reply topic leaves the value alone and logs a warning."""
+        with caplog.at_level(logging.WARNING, logger="aiocometwifi.thermostat"):
+            transport.deliver(AMBIENT_TOPIC, "#ZZ")
+
+        assert connected_thermostat.temperature_ambient == 0.0
+        assert "#ZZ" in caplog.text
+        assert AMBIENT_TOPIC in caplog.text
+
+    def test_empty_payload_is_logged_and_dropped(
+        self,
+        connected_thermostat: Thermostat,
+        transport: FakeTransport,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A bare prefix with no value is malformed too."""
+        with caplog.at_level(logging.WARNING, logger="aiocometwifi.thermostat"):
+            transport.deliver(SETPOINT_TOPIC, "#")
+
+        assert connected_thermostat.setpoint == 0.0
+        assert "Ignoring malformed payload" in caplog.text

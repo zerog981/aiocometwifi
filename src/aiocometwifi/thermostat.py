@@ -1,15 +1,17 @@
 """Thermostat communication class."""
 
+import logging
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from comet_wifi_communicator import const
-from comet_wifi_communicator.const import (
+from aiocometwifi.const import (
     CFG_DST,
     CFG_KEY_LOCK,
     CFG_KEY_LOCK_PLUS,
     CFG_MIRRORED_DISPLAY,
     CFG_PAYLOAD_LENGTH,
+    CONNECTION_TEST_COMMAND,
     CONNECTION_TEST_TIMEOUT,
     HEX_PREFIX,
     REQUEST_BASE_SOFTWARE_VERSION,
@@ -27,16 +29,19 @@ from comet_wifi_communicator.const import (
     TEMPERATURE_SETPOINT_MAX,
     TEMPERATURE_SETPOINT_MIN,
 )
-from comet_wifi_communicator.enums import WindowOpenSensitivity
-from comet_wifi_communicator.helper import (
+from aiocometwifi.enums import WindowOpenSensitivity
+from aiocometwifi.helper import (
     decode_temperature,
     encode_temperature,
     hex_str_to_int,
     validate_and_streamline_mac,
 )
-from comet_wifi_communicator.mqtt_topics import MqttTopics
-from paho.mqtt.client import Client
-from paho.mqtt.enums import CallbackAPIVersion
+from aiocometwifi.mqtt_topics import MqttTopics
+
+if TYPE_CHECKING:
+    from aiocometwifi.mqtt import MqttClient
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -108,28 +113,23 @@ class Thermostat:
 
     """
 
-    def __init__(self, mqtt_host: str, mqtt_port: int, mac: str):
-        """Initialization of a thermostat instance.
+    def __init__(self, mqtt_client: MqttClient, mac: str) -> None:
+        """Initialize a thermostat instance.
 
-        Args:
-            mqtt_host: MQTT host over which to communicate with thermostat.
-            mqtt_port: MQTT port of MQTT host.
-            mac: Thermostat MAC Address.
-
+        :param mqtt_client: MQTT client.
+        :param mac: Thermostat MAC Address.
         """
         self._mac = validate_and_streamline_mac(mac)
-        self._mqtt_host = mqtt_host
-        self._mqtt_port = mqtt_port
+        self._mqtt = mqtt_client
         self._connected = False
         self._topics = MqttTopics(self._mac)
+        # Subscribe to value topics and ping topic
+        self._subscriptions = (
+            *self._topics.reply_topics.values(),
+            self._topics.command_topics["CONNECTION_TEST"],
+        )
         self._data = ThermostatData()
         self.config = ThermostatConfig()
-
-        self._mqtt_client = Client(callback_api_version=CallbackAPIVersion.VERSION2)
-        self._mqtt_client.on_connect = self._on_mqtt_connect
-        self._mqtt_client.on_message = self._on_mqtt_message
-
-        self._mqtt_client.user_data_set([])  # Clear user data from the client
 
         self._last_connection_test_published = (
             0  # UNIX time of last published connection test.
@@ -139,11 +139,6 @@ class Thermostat:
     def connected(self) -> bool:
         """Connection to the thermostat is established."""
         return self._connected
-
-    @property
-    def mqtt_host(self) -> str:
-        """The MQTT host used for communication."""
-        return self._mqtt_host
 
     @property
     def setpoint(self) -> float:
@@ -180,22 +175,19 @@ class Thermostat:
         """Thermostat MAC address."""
         return self._mac
 
-    def _on_mqtt_connect(self, client, userdata, flags, reason_code, properties=None):
-        if reason_code.is_failure:
-            raise MQTTConnectError
-        # Subscribe from on_connect to be sure that subscription is persisted across reconnections
-        for topic in self._topics.reply_topics.values():
-            client.subscribe(topic)
-        client.subscribe(self._topics.command_topics["CONNECTION_TEST"])
+    def _on_message(self, topic: str, payload: str) -> None:
+        """Handle a message received from the MQTT transport.
 
-    def _on_mqtt_message(self, client, userdata, message):
-        # Thermostat disconnected
-        if message.topic == self._topics.reply_topics["WILL"]:
+        :param topic: Topic of the message.
+        :param payload: Message payload, decoded to text.
+        """
+        # Thermostat connection status
+        if topic == self._topics.reply_topics["WILL"]:
             self._connected = False
             return
-
         self._connected = True
-        if message.topic == self._topics.command_topics["CONNECTION_TEST"]:
+
+        if topic == self._topics.command_topics["CONNECTION_TEST"]:
             if (
                 time.time() - self._last_connection_test_published
                 > CONNECTION_TEST_TIMEOUT
@@ -203,64 +195,64 @@ class Thermostat:
                 self._publish_connection_test()
             return
 
-        if message.topic == self._topics.reply_topics["TEMPERATURE_AMBIENT"]:
-            self._data.temperature_ambient = decode_temperature(
-                message.payload.decode("utf-8").lstrip(HEX_PREFIX)
-            )
+        try:
+            self._store_reply(topic, payload.lstrip(HEX_PREFIX))
+        except ValueError:
+            _LOGGER.warning("Ignoring malformed payload %r on %s.", payload, topic)
+
+    def _store_reply(self, topic: str, value: str) -> None:
+        """Decode a reply from the thermostat and record it.
+
+        :param topic: Reply topic of value.
+        :param value: Payload without hex prefix.
+        :raises ValueError: If the value is invalid.
+        """
+        replies = self._topics.reply_topics
+        if topic == replies["TEMPERATURE_AMBIENT"]:
+            self._data.temperature_ambient = decode_temperature(value)
+        elif topic == replies["TEMPERATURE_SETPOINT"]:
+            self._store_setpoint(value)
+        elif topic == replies["TEMPERATURE_OFFSET"]:
+            self._data.temperature_offset = decode_temperature(value)
+        elif topic == replies["BATTERY"]:
+            self._data.battery_level = hex_str_to_int(value)
+        elif topic == replies["CONFIGURATION"]:
+            self.config.write_config(hex_str_to_int(value) >> 8 & 0xFF)
+
+    def _store_setpoint(self, value: str) -> None:
+        """Record a setpoint reply, and set off and fully on.
+
+        :param value: Setpoint payload without hex prefix.
+        :raises ValueError: If value is invalid.
+        """
+        raw = hex_str_to_int(value)
+        if raw == TEMPERATURE_HEX_OFF:
+            self._data.is_heating = False
+            self._data.temperature_setpoint = TEMPERATURE_SETPOINT_MIN
             return
+        self._data.is_heating = True
+        if raw == TEMPERATURE_HEX_ON:
+            self._data.temperature_setpoint = TEMPERATURE_SETPOINT_MAX
+        else:
+            self._data.temperature_setpoint = decode_temperature(value)
 
-        if message.topic == self._topics.reply_topics["TEMPERATURE_SETPOINT"]:
-            payload = message.payload.decode("utf-8").lstrip(HEX_PREFIX)
-            if payload == f"{TEMPERATURE_HEX_OFF:02X}":
-                self._data.is_heating = False
-                self._data.temperature_setpoint = TEMPERATURE_SETPOINT_MIN
-                return
-            if payload == f"{TEMPERATURE_HEX_ON:02X}":
-                self._data.temperature_setpoint = TEMPERATURE_SETPOINT_MAX
-            else:
-                self._data.temperature_setpoint = decode_temperature(payload)
-            self._data.is_heating = True
-            return
-
-        if message.topic == self._topics.reply_topics["BATTERY"]:
-            self._data.battery_level = hex_str_to_int(
-                message.payload.decode("utf-8").lstrip(HEX_PREFIX)
-            )
-
-            return
-
-        if message.topic == self._topics.reply_topics["CONFIGURATION"]:
-            payload = message.payload.decode("utf-8")
-            raw_data = int(payload.lstrip(HEX_PREFIX), 16)
-            config_byte = raw_data >> 8 & 0xFF
-            self.config.write_config(config_byte)
-            return
-
-    def _publish_connection_test(self):
+    def _publish_connection_test(self) -> None:
         self._mqtt_client.publish(
             self._topics.command_topics["CONNECTION_TEST"],
-            const.CONNECTION_TEST_COMMAND,
+            CONNECTION_TEST_COMMAND,
         )
         self._last_connection_test_published = time.time()
 
     async def connect(self) -> None:
-        """Initiate connection to MQTT broker.
-
-        Initiates connection to MQTT broker and requests all standard parameters from thermostat.
-
-        """
-        self._mqtt_client.connect(self._mqtt_host, self._mqtt_port)
-        self._mqtt_client.loop_start()
+        """Subscribe to thermostat topics and request standard values."""
+        for topic in self._subscriptions:
+            await self._mqtt.subscribe(self._mac, topic, self._on_message)
         await self.update_standard_values()
 
-    async def disconnect(self):
-        """Disconnect from MQTT broker.
-
-        Disconnect from MQTT broker.
-
-        """
-        self._mqtt_client.disconnect()
-        self._mqtt_client.loop_stop()
+    async def disconnect(self) -> None:
+        """Release the subscriptions done by :meth:`connect`."""
+        for topic in self._subscriptions:
+            await self._mqtt.unsubscribe(self._mac, topic)
         self._connected = False
 
     async def update_values(self, request_value: int = 0xFFFFFFFF) -> None:
@@ -316,7 +308,7 @@ class Thermostat:
         """
         await self.update_values(REQUEST_CONFIG)
 
-    async def _config_enable(self, values: int = 0x0000):
+    async def _config_enable(self, values: int = 0x0000) -> None:
         if not self._connected:
             raise ConnectionError
         # Payload has five bytes with first byte containing enable flags
@@ -328,7 +320,7 @@ class Thermostat:
         )
         await self.update_config()
 
-    async def _config_disable(self, values: int = 0x0000):
+    async def _config_disable(self, values: int = 0x0000) -> None:
         if not self._connected:
             raise ConnectionError
         # Payload has five bytes with second byte containing disable flags
@@ -343,7 +335,8 @@ class Thermostat:
     async def enable_key_lock_plus(self) -> None:
         """Enable key lock plus.
 
-        Activates key lock that can only be controlled remotly and not directly on the device.
+        Activates key lock that can only be controlled remotly
+        and not directly on the device.
 
         """
         await self._config_enable(CFG_KEY_LOCK_PLUS)
@@ -351,7 +344,8 @@ class Thermostat:
     async def disable_key_lock_plus(self) -> None:
         """Disable key lock plus.
 
-        Disable key lock that can only be controlled remotly and not directly on the device.
+        Disable key lock that can only be controlled remotly and not
+        directly on the device.
 
         """
         await self._config_disable(CFG_KEY_LOCK_PLUS)
@@ -448,7 +442,3 @@ class Thermostat:
             f"{HEX_PREFIX}{TEMPERATURE_HEX_ON:02X}",
         )
         await self.update_heating_values()
-
-
-class MQTTConnectError(Exception):
-    """MQTT connection error."""
