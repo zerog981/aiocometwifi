@@ -111,6 +111,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+
       - name: Publish the GitHub release
         uses: python-semantic-release/publish-action@v10
         with:
