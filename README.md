@@ -43,7 +43,7 @@ with the `setup` command of [`comet-wifi-communicator`](https://pypi.org/project
 pipx run comet-wifi-communicator setup --wifi-ssid <ssid> --mqtt-server-ip <broker ip>
 ```
 
-It prompts for the Wi-Fi password and explains the reset and hotspot steps in setup --help.
+It prompts for the Wi-Fi password and explains the reset and hotspot steps in `setup --help`.
 `aiocometwifi` takes over once the device is on the broker.
 
 ## 🚀 Quick start
