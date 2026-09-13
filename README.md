@@ -21,7 +21,7 @@ broker connection, but works with any client (the quick start below uses
 support authentication). The official Home Assistant Mosquitto add-on does not qualify.
 See [Broker](#-broker).
 2. **Each thermostat must be reconfigured for LAN-only operation**, pointing at that broker, using the
-   `setup-thermostat` command of `comet-wifi-communicator`. See [Device setup](#-device-setup).
+   `comet-wifi-communicator setup` command. See [Device setup](#-device-setup).
 3. **Python ≥ 3.14 and an MQTT client of your own** (paho-mqtt, aiomqtt, Home Assistant's MQTT
    integration, …), the library only adapts to it.
 
@@ -37,13 +37,13 @@ broker, or a bridge to it, is required.
 
 Out of the box a Comet WiFi talks to the manufacturer's cloud. For this library it has to be
 reconfigured for **LAN-only** operation, pointed at your own broker. This has to be done once
-and with the `setup-thermostat` command of [`comet-wifi-communicator`](https://pypi.org/project/comet-wifi-communicator/):
+with the `setup` command of [`comet-wifi-communicator`](https://pypi.org/project/comet-wifi-communicator/):
 
 ```bash
-pip install comet-wifi-communicator
-setup-thermostat --wifi-ssid <ssid> --wifi-password <password> --mqtt-server-ip <broker ip>
+pipx run comet-wifi-communicator setup --wifi-ssid <ssid> --mqtt-server-ip <broker ip>
 ```
 
+It prompts for the Wi-Fi password and explains the reset and hotspot steps in setup --help.
 `aiocometwifi` takes over once the device is on the broker.
 
 ## 🚀 Quick start
@@ -156,10 +156,8 @@ back. The library recognizes its own echoes and rate-limits pongs, so it never l
 
 ## 🔗 Relation to `comet-wifi-communicator`
 
-[`comet-wifi-communicator`](https://pypi.org/project/comet-wifi-communicator/) is the same
-protocol with a bundled paho client, for scripts and standalone use, and it provides the
-`setup-thermostat` command above. `aiocometwifi` is for hosts that already have an MQTT
-connection and an event loop, Home Assistant first of all.
+`comet-wifi-communicator` is a one-time setup tool. `aiocometwifi` is for hosts that already have 
+an MQTT connection and an event loop, Home Assistant first of all.
 
 ## 🛠️ Development
 
